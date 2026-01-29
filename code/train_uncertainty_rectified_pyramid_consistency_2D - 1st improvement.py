@@ -79,7 +79,7 @@ def get_current_consistency_weight(epoch):
 
 def get_current_dice_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
-    return max(0.5, ramps.sigmoid_rampup(epoch, args.consistency_rampup))
+    return max(0.3, ramps.sigmoid_rampup(epoch, args.consistency_rampup))
 
 
 def train(args, snapshot_path):
@@ -162,7 +162,7 @@ def train(args, snapshot_path):
             supervised_loss_ce = (loss_ce+loss_ce_aux1+loss_ce_aux2+loss_ce_aux3) / 4
             supervised_loss_dice = (loss_dice+loss_dice_aux1+loss_dice_aux2+loss_dice_aux3) / 4
 
-            dice_weight = get_current_dice_weight(iter_num//150)
+            dice_weight = get_current_dice_weight(iter_num//10)
 
             # supervised_loss = (loss_ce+loss_ce_aux1+loss_ce_aux2+loss_ce_aux3 +
             #                    loss_dice+loss_dice_aux1+loss_dice_aux2+loss_dice_aux3)/8
