@@ -79,7 +79,7 @@ def get_current_consistency_weight(epoch):
 
 def get_current_dice_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
-    return 1 * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
+    return max(0.3, ramps.sigmoid_rampup(epoch, args.consistency_rampup))
 
 
 def train(args, snapshot_path):
