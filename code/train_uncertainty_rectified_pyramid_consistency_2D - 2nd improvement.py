@@ -5,6 +5,7 @@ import random
 import shutil
 import sys
 import time
+import copy
 
 import numpy as np
 import torch
@@ -19,6 +20,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.utils import make_grid
 from tqdm import tqdm
+from scipy.ndimage import gaussian_filter, map_coordinates
 
 from dataloaders import utils
 from dataloaders.dataset import BaseDataSets, RandomGenerator, TwoStreamBatchSampler
@@ -30,7 +32,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--root_path', type=str,
                     default='../data/ACDC', help='Name of Experiment')
 parser.add_argument('--exp', type=str,
-                    default='ACDC/Uncertainty_Rectified_Pyramid_Consistency', help='experiment_name')
+                    default='ACDC/Uncertainty_Rectified_Pyramid_Consistency_v2', help='experiment_name')
 parser.add_argument('--model', type=str,
                     default='unet_urpc', help='model_name')
 parser.add_argument('--max_iterations', type=int,
@@ -57,7 +59,54 @@ parser.add_argument('--consistency', type=float,
                     default=0.1, help='consistency')
 parser.add_argument('--consistency_rampup', type=float,
                     default=200.0, help='consistency_rampup')
+# EMA decay
+parser.add_argument('--ema_decay', type=float, default=0.99, help='ema_decay')
+# Confidence threshold for pseudo-labels
+parser.add_argument('--conf_thresh', type=float, default=0.95, help='confidence threshold')
 args = parser.parse_args()
+
+
+def update_ema_variables(model, ema_model, alpha, global_step):
+    """Update EMA model weights"""
+    alpha = min(1 - 1 / (global_step + 1), alpha)
+    for ema_param, param in zip(ema_model.parameters(), model.parameters()):
+        ema_param.data.mul_(alpha).add_(param.data, alpha=1 - alpha)
+
+
+class FocalLoss(nn.Module):
+    """Focal Loss for addressing class imbalance"""
+    def __init__(self, gamma=2, alpha=None, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+        
+        if self.alpha is not None:
+            alpha_t = self.alpha[targets]
+            focal_loss = alpha_t * focal_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        return focal_loss
+
+
+def get_confidence_mask(probs, threshold=0.95):
+    """Create mask for high-confidence predictions"""
+    max_probs, _ = torch.max(probs, dim=1)
+    return (max_probs > threshold).float()
+
+
+def sharpening(p, temperature=0.5):
+    """Sharpen predictions to reduce entropy"""
+    p_sharp = p ** (1.0 / temperature)
+    return p_sharp / p_sharp.sum(dim=1, keepdim=True)
 
 
 def patients_to_slices(dataset, patiens_num):
@@ -77,9 +126,11 @@ def get_current_consistency_weight(epoch):
     # Consistency ramp-up from https://arxiv.org/abs/1610.02242
     return args.consistency * ramps.sigmoid_rampup(epoch, args.consistency_rampup)
 
-def get_current_dice_weight(epoch):
-    # Consistency ramp-up from https://arxiv.org/abs/1610.02242
-    return max(0.3, ramps.sigmoid_rampup(epoch, args.consistency_rampup))
+
+def entropy_loss(p, C=4):
+    """Entropy minimization loss for unlabeled data"""
+    y1 = -1 * torch.sum(p * torch.log(p + 1e-6), dim=1) / np.log(C)
+    return torch.mean(y1)
 
 
 def train(args, snapshot_path):
@@ -88,8 +139,15 @@ def train(args, snapshot_path):
     batch_size = args.batch_size
     max_iterations = args.max_iterations
 
+    # Create student model
     model = net_factory(net_type=args.model, in_chns=1,
                         class_num=num_classes)
+    
+    # Create EMA (teacher) model
+    ema_model = net_factory(net_type=args.model, in_chns=1,
+                            class_num=num_classes)
+    for param in ema_model.parameters():
+        param.detach_()  # EMA model doesn't need gradients
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -117,6 +175,9 @@ def train(args, snapshot_path):
 
     optimizer = optim.SGD(model.parameters(), lr=base_lr,
                           momentum=0.9, weight_decay=0.0001)
+    
+    # Use Focal Loss instead of CE for better handling of class imbalance
+    focal_loss = FocalLoss(gamma=2.0)
     ce_loss = CrossEntropyLoss()
     dice_loss = losses.DiceLoss(num_classes)
 
@@ -149,6 +210,10 @@ def train(args, snapshot_path):
                                    label_batch[:args.labeled_bs][:].long())
             loss_ce_aux3 = ce_loss(outputs_aux3[:args.labeled_bs],
                                    label_batch[:args.labeled_bs][:].long())
+            
+            # Focal loss for main output (handles class imbalance better)
+            loss_focal = focal_loss(outputs[:args.labeled_bs],
+                                    label_batch[:args.labeled_bs][:].long())
 
             loss_dice = dice_loss(
                 outputs_soft[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1))
@@ -158,64 +223,75 @@ def train(args, snapshot_path):
                 outputs_aux2_soft[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1))
             loss_dice_aux3 = dice_loss(
                 outputs_aux3_soft[:args.labeled_bs], label_batch[:args.labeled_bs].unsqueeze(1))
+
+            # Combined supervised loss with Focal Loss
+            supervised_loss_ce = (loss_ce + loss_ce_aux1 + loss_ce_aux2 + loss_ce_aux3) / 4
+            supervised_loss_dice = (loss_dice + loss_dice_aux1 + loss_dice_aux2 + loss_dice_aux3) / 4
             
-            supervised_loss_ce = (loss_ce+loss_ce_aux1+loss_ce_aux2+loss_ce_aux3) / 4
-            supervised_loss_dice = (loss_dice+loss_dice_aux1+loss_dice_aux2+loss_dice_aux3) / 4
+            # Use mixture of CE and Focal Loss
+            supervised_loss = 0.5 * supervised_loss_ce + 0.5 * loss_focal + supervised_loss_dice
 
-            dice_weight = get_current_dice_weight(iter_num//10)
-
-            # supervised_loss = (loss_ce+loss_ce_aux1+loss_ce_aux2+loss_ce_aux3 +
-            #                    loss_dice+loss_dice_aux1+loss_dice_aux2+loss_dice_aux3)/8
-
-            supervised_loss = supervised_loss_ce + dice_weight * supervised_loss_dice
-
-            preds = (outputs_soft+outputs_aux1_soft +
-                     outputs_aux2_soft+outputs_aux3_soft)/4
+            # Sharpened predictions for better pseudo-labels
+            preds = (outputs_soft + outputs_aux1_soft +
+                     outputs_aux2_soft + outputs_aux3_soft) / 4
+            preds_sharp = sharpening(preds, temperature=0.5)
+            
+            # Confidence mask for unlabeled data
+            confidence_mask = get_confidence_mask(preds[args.labeled_bs:], args.conf_thresh)
 
             variance_main = torch.sum(kl_distance(
-                torch.log(outputs_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
+                torch.log(outputs_soft[args.labeled_bs:] + 1e-8), preds[args.labeled_bs:]), dim=1, keepdim=True)
             exp_variance_main = torch.exp(-variance_main)
 
             variance_aux1 = torch.sum(kl_distance(
-                torch.log(outputs_aux1_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
+                torch.log(outputs_aux1_soft[args.labeled_bs:] + 1e-8), preds[args.labeled_bs:]), dim=1, keepdim=True)
             exp_variance_aux1 = torch.exp(-variance_aux1)
 
             variance_aux2 = torch.sum(kl_distance(
-                torch.log(outputs_aux2_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
+                torch.log(outputs_aux2_soft[args.labeled_bs:] + 1e-8), preds[args.labeled_bs:]), dim=1, keepdim=True)
             exp_variance_aux2 = torch.exp(-variance_aux2)
 
             variance_aux3 = torch.sum(kl_distance(
-                torch.log(outputs_aux3_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
+                torch.log(outputs_aux3_soft[args.labeled_bs:] + 1e-8), preds[args.labeled_bs:]), dim=1, keepdim=True)
             exp_variance_aux3 = torch.exp(-variance_aux3)
 
             consistency_weight = get_current_consistency_weight(iter_num//150)
             consistency_dist_main = (
                 preds[args.labeled_bs:] - outputs_soft[args.labeled_bs:]) ** 2
 
+            # Apply confidence mask to consistency loss
             consistency_loss_main = torch.mean(
-                consistency_dist_main * exp_variance_main) / (torch.mean(exp_variance_main) + 1e-8) + torch.mean(variance_main)
+                consistency_dist_main * exp_variance_main * confidence_mask.unsqueeze(1)) / (torch.mean(exp_variance_main * confidence_mask.unsqueeze(1)) + 1e-8) + torch.mean(variance_main)
 
             consistency_dist_aux1 = (
                 preds[args.labeled_bs:] - outputs_aux1_soft[args.labeled_bs:]) ** 2
             consistency_loss_aux1 = torch.mean(
-                consistency_dist_aux1 * exp_variance_aux1) / (torch.mean(exp_variance_aux1) + 1e-8) + torch.mean(variance_aux1)
+                consistency_dist_aux1 * exp_variance_aux1 * confidence_mask.unsqueeze(1)) / (torch.mean(exp_variance_aux1 * confidence_mask.unsqueeze(1)) + 1e-8) + torch.mean(variance_aux1)
 
             consistency_dist_aux2 = (
                 preds[args.labeled_bs:] - outputs_aux2_soft[args.labeled_bs:]) ** 2
             consistency_loss_aux2 = torch.mean(
-                consistency_dist_aux2 * exp_variance_aux2) / (torch.mean(exp_variance_aux2) + 1e-8) + torch.mean(variance_aux2)
+                consistency_dist_aux2 * exp_variance_aux2 * confidence_mask.unsqueeze(1)) / (torch.mean(exp_variance_aux2 * confidence_mask.unsqueeze(1)) + 1e-8) + torch.mean(variance_aux2)
 
             consistency_dist_aux3 = (
                 preds[args.labeled_bs:] - outputs_aux3_soft[args.labeled_bs:]) ** 2
             consistency_loss_aux3 = torch.mean(
-                consistency_dist_aux3 * exp_variance_aux3) / (torch.mean(exp_variance_aux3) + 1e-8) + torch.mean(variance_aux3)
+                consistency_dist_aux3 * exp_variance_aux3 * confidence_mask.unsqueeze(1)) / (torch.mean(exp_variance_aux3 * confidence_mask.unsqueeze(1)) + 1e-8) + torch.mean(variance_aux3)
 
             consistency_loss = (consistency_loss_main + consistency_loss_aux1 +
                                 consistency_loss_aux2 + consistency_loss_aux3) / 4
-            loss = supervised_loss + consistency_weight * consistency_loss
+            
+            # Entropy minimization on unlabeled data (encourages confident predictions)
+            entropy_weight = 0.1 * ramps.sigmoid_rampup(iter_num // 150, args.consistency_rampup)
+            entropy_loss_val = entropy_loss(preds[args.labeled_bs:], num_classes)
+            
+            loss = supervised_loss + consistency_weight * consistency_loss + entropy_weight * entropy_loss_val
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            
+            # Update EMA model
+            update_ema_variables(model, ema_model, args.ema_decay, iter_num)
 
             lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
             for param_group in optimizer.param_groups:
@@ -230,9 +306,13 @@ def train(args, snapshot_path):
                               consistency_loss, iter_num)
             writer.add_scalar('info/consistency_weight',
                               consistency_weight, iter_num)
+            writer.add_scalar('info/entropy_loss', entropy_loss_val, iter_num)
+            writer.add_scalar('info/confidence_ratio', 
+                              confidence_mask.mean(), iter_num)
             logging.info(
-                'iteration %d : loss : %f, loss_ce: %f, loss_dice: %f' %
-                (iter_num, loss.item(), loss_ce.item(), loss_dice.item()))
+                'iteration %d : loss : %f, loss_ce: %f, loss_dice: %f, cons_loss: %f, ent_loss: %f' %
+                (iter_num, loss.item(), loss_ce.item(), loss_dice.item(), 
+                 consistency_loss.item(), entropy_loss_val.item()))
 
             if iter_num % 20 == 0:
                 image = volume_batch[1, 0:1, :, :]
