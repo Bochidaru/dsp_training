@@ -188,7 +188,7 @@ def train(args, snapshot_path):
                 torch.log(outputs_aux3_soft[args.labeled_bs:]), preds[args.labeled_bs:]), dim=1, keepdim=True)
             exp_variance_aux3 = torch.exp(-variance_aux3)
 
-            consistency_weight = get_current_consistency_weight(iter_num//150)
+            consistency_weight = get_current_consistency_weight(iter_num//20)
             consistency_dist_main = (
                 preds[args.labeled_bs:] - outputs_soft[args.labeled_bs:]) ** 2
 
