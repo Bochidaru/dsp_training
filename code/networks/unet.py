@@ -474,7 +474,7 @@ class FFCBlock(nn.Module):
 
 
 class ConvFFCBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, dropout_p, ratio_g=0.25):
+    def __init__(self, in_ch, out_ch, dropout_p, ratio_g=0.1):
         super().__init__()
 
         global_ch = int(out_ch * ratio_g)
