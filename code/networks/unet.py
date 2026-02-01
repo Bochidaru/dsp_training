@@ -402,26 +402,26 @@ class UNet_URPC(nn.Module): # tạm thời sửa trực tiếp vào unet_urpc ch
         return dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg
     
 
-# class UNet_URPC_FFC(nn.Module):
-#     def __init__(self, in_chns, class_num, ratio_g=0.5):
-#         super(UNet_URPC_FFC, self).__init__()
+class UNet_URPC_FFC(nn.Module):
+    def __init__(self, in_chns, class_num, ratio_g=0.5):
+        super(UNet_URPC_FFC, self).__init__()
 
-#         params = {'in_chns': in_chns,
-#                   'feature_chns': [16, 32, 64, 128, 256],
-#                   'dropout': [0.05, 0.1, 0.2, 0.3, 0.5],
-#                   'class_num': class_num,
-#                   'bilinear': False,
-#                   'acti_func': 'relu'}
+        params = {'in_chns': in_chns,
+                  'feature_chns': [16, 32, 64, 128, 256],
+                  'dropout': [0.05, 0.1, 0.2, 0.3, 0.5],
+                  'class_num': class_num,
+                  'bilinear': False,
+                  'acti_func': 'relu'}
 
-#         self.encoder = FFC_Encoder(params, ratio_g=ratio_g)
-#         self.decoder = Decoder_URPC(params)
+        self.encoder = FFC_Encoder(params, ratio_g=ratio_g)
+        self.decoder = Decoder_URPC(params)
 
-#     def forward(self, x):
-#         shape = x.shape[2:]
-#         feature = self.encoder(x)
-#         dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg = self.decoder(
-#             feature, shape)
-#         return dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg
+    def forward(self, x):
+        shape = x.shape[2:]
+        feature = self.encoder(x)
+        dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg = self.decoder(
+            feature, shape)
+        return dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg
 
 
 class UNet_DS(nn.Module):
