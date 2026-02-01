@@ -116,6 +116,38 @@ class Encoder(nn.Module):
         return [x0, x1, x2, x3, x4]
 
 
+class FFC_Encoder(nn.Module):
+    def __init__(self, params, ratio_g=0.5):
+        super(FFC_Encoder, self).__init__()
+        self.params = params
+        self.in_chns = self.params['in_chns']
+        self.ft_chns = self.params['feature_chns']
+        self.n_class = self.params['class_num']
+        self.bilinear = self.params['bilinear']
+        self.dropout = self.params['dropout']
+        assert (len(self.ft_chns) == 5)
+
+        self.in_conv = FFCBlock(self.in_chns, self.ft_chns[0], ratio_g=ratio_g)
+
+        self.down1 = DownBlock(
+            self.ft_chns[0], self.ft_chns[1], self.dropout[1])
+        self.down2 = DownBlock(
+            self.ft_chns[1], self.ft_chns[2], self.dropout[2])
+        self.down3 = DownBlock(
+            self.ft_chns[2], self.ft_chns[3], self.dropout[3])
+        self.down4 = DownBlock(
+            self.ft_chns[3], self.ft_chns[4], self.dropout[4])
+
+    def forward(self, x):
+        x0 = self.in_conv(x)
+        x1 = self.down1(x0)
+        x2 = self.down2(x1)
+        x3 = self.down3(x2)
+        x4 = self.down4(x3)
+        return [x0, x1, x2, x3, x4]
+
+
+
 class Decoder(nn.Module):
     def __init__(self, params):
         super(Decoder, self).__init__()
@@ -349,7 +381,7 @@ class UNet_CCT(nn.Module):
         return main_seg, aux_seg1, aux_seg2, aux_seg3
 
 
-class UNet_URPC(nn.Module):
+class UNet_URPC(nn.Module): # tạm thời sửa trực tiếp vào unet_urpc cho đỡ phải sửa nhiều test
     def __init__(self, in_chns, class_num):
         super(UNet_URPC, self).__init__()
 
@@ -359,7 +391,7 @@ class UNet_URPC(nn.Module):
                   'class_num': class_num,
                   'bilinear': False,
                   'acti_func': 'relu'}
-        self.encoder = Encoder(params)
+        self.encoder = FFC_Encoder(params)
         self.decoder = Decoder_URPC(params)
 
     def forward(self, x):
@@ -368,6 +400,28 @@ class UNet_URPC(nn.Module):
         dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg = self.decoder(
             feature, shape)
         return dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg
+    
+
+# class UNet_URPC_FFC(nn.Module):
+#     def __init__(self, in_chns, class_num, ratio_g=0.5):
+#         super(UNet_URPC_FFC, self).__init__()
+
+#         params = {'in_chns': in_chns,
+#                   'feature_chns': [16, 32, 64, 128, 256],
+#                   'dropout': [0.05, 0.1, 0.2, 0.3, 0.5],
+#                   'class_num': class_num,
+#                   'bilinear': False,
+#                   'acti_func': 'relu'}
+
+#         self.encoder = FFC_Encoder(params, ratio_g=ratio_g)
+#         self.decoder = Decoder_URPC(params)
+
+#     def forward(self, x):
+#         shape = x.shape[2:]
+#         feature = self.encoder(x)
+#         dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg = self.decoder(
+#             feature, shape)
+#         return dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg
 
 
 class UNet_DS(nn.Module):
@@ -391,3 +445,30 @@ class UNet_DS(nn.Module):
         return dp0_out_seg, dp1_out_seg, dp2_out_seg, dp3_out_seg
 
 
+class FFCBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, ratio_g=0.5):
+        super().__init__()
+        self.global_ch = int(out_ch * ratio_g)
+        self.local_ch = out_ch - self.global_ch
+
+        self.conv_l = nn.Conv2d(in_ch, self.local_ch, 3, padding=1)
+        self.conv_g = nn.Conv2d(in_ch, self.global_ch, 1)
+
+        self.bn_l = nn.BatchNorm2d(self.local_ch)
+        self.bn_g = nn.BatchNorm2d(self.global_ch)
+
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        # local branch
+        xl = self.conv_l(x)
+        xl = self.bn_l(xl)
+
+        # global branch
+        xg = torch.fft.rfft2(x, norm="ortho")
+        xg = self.conv_g(xg.real)
+        xg = torch.fft.irfft2(xg, s=x.shape[-2:], norm="ortho")
+        xg = self.bn_g(xg)
+
+        x = torch.cat([xl, xg], dim=1)
+        return self.relu(x)
