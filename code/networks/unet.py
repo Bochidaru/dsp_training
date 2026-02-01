@@ -460,15 +460,14 @@ class FFCBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        # local branch
-        xl = self.conv_l(x)
-        xl = self.bn_l(xl)
+        xl = self.relu(self.bn_l(self.conv_l(x)))
 
-        # global branch
-        xg = torch.fft.rfft2(x, norm="ortho")
-        xg = self.conv_g(xg.real)
+        xg_fft = torch.fft.rfft2(x, norm="ortho")
+        xg_real = xg_fft.real
+        xg_real = torch.nan_to_num(xg_real, nan=0.0, posinf=1e6, neginf=-1e6)
+
+        xg = self.conv_g(xg_real)
         xg = torch.fft.irfft2(xg, s=x.shape[-2:], norm="ortho")
-        xg = self.bn_g(xg)
+        xg = self.relu(self.bn_g(xg))
 
-        x = torch.cat([xl, xg], dim=1)
-        return self.relu(x)
+        return torch.cat([xl, xg], dim=1)
