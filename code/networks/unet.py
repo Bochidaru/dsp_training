@@ -449,7 +449,7 @@ class FFCBlock(nn.Module):
     """
     Pure Fast Fourier Convolution Block (Global branch only)
     """
-    def __init__(self, in_ch, out_ch):
+    def __init__(self, in_ch, out_ch, dropout_p=0.0):
         super().__init__()
 
         self.out_ch = out_ch
@@ -459,6 +459,8 @@ class FFCBlock(nn.Module):
 
         self.norm = nn.InstanceNorm2d(out_ch, affine=True)
         self.relu = nn.LeakyReLU(inplace=True)
+
+        self.dropout = nn.Dropout(dropout_p)
 
     def forward(self, x):
         x_fft = torch.fft.rfft2(x, norm="ortho")
@@ -470,11 +472,12 @@ class FFCBlock(nn.Module):
         x = torch.fft.irfft2(x_fft, s=x.shape[-2:], norm="ortho")
         x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
         x = self.relu(self.norm(x))
+        x = self.dropout(x)
         return x
 
 
 class ConvFFCBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, dropout_p, ratio_g=0.1):
+    def __init__(self, in_ch, out_ch, dropout_p, ratio_g=0.2):
         super().__init__()
 
         global_ch = int(out_ch * ratio_g)
@@ -482,7 +485,7 @@ class ConvFFCBlock(nn.Module):
 
         self.local = ConvBlock(in_ch, local_ch, dropout_p)
 
-        self.global_ffc = FFCBlock(in_ch, global_ch)
+        self.global_ffc = FFCBlock(in_ch, global_ch, dropout_p)
 
         # Fuse
         self.fuse = nn.Sequential(
