@@ -28,13 +28,28 @@ parser.add_argument('--labeled_num', type=int, default=3,
                     help='labeled data')
 
 
+# def calculate_metric_percase(pred, gt):
+#     pred[pred > 0] = 1
+#     gt[gt > 0] = 1
+#     dice = metric.binary.dc(pred, gt)
+#     asd = metric.binary.asd(pred, gt)
+#     hd95 = metric.binary.hd95(pred, gt)
+#     return dice, hd95, asd
+
 def calculate_metric_percase(pred, gt):
-    pred[pred > 0] = 1
-    gt[gt > 0] = 1
+    pred = pred.astype(np.bool_)
+    gt   = gt.astype(np.bool_)
+
+    if pred.sum() == 0 and gt.sum() == 0:
+        return 1.0, 0.0, 0.0  # perfect
+    elif pred.sum() == 0 or gt.sum() == 0:
+        return 0.0, np.inf, np.inf
+
     dice = metric.binary.dc(pred, gt)
-    asd = metric.binary.asd(pred, gt)
+    asd  = metric.binary.asd(pred, gt)
     hd95 = metric.binary.hd95(pred, gt)
     return dice, hd95, asd
+
 
 
 def test_single_volume(case, net, test_save_path, FLAGS):
