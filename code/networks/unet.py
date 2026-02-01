@@ -446,28 +446,49 @@ class UNet_DS(nn.Module):
 
 
 class FFCBlock(nn.Module):
+    """
+    Fast Fourier Convolution Block
+    Combines local spatial features with global frequency-domain features
+    """
     def __init__(self, in_ch, out_ch, ratio_g=0.5):
         super().__init__()
         self.global_ch = int(out_ch * ratio_g)
         self.local_ch = out_ch - self.global_ch
 
+        # Local branch - standard spatial convolution
         self.conv_l = nn.Conv2d(in_ch, self.local_ch, 3, padding=1)
-        self.conv_g = nn.Conv2d(in_ch, self.global_ch, 1)
-
         self.bn_l = nn.BatchNorm2d(self.local_ch)
+
+        # Global branch - process in spatial domain, use FFT for global receptive field
+        # Conv on real and imaginary parts separately
+        self.conv_g_real = nn.Conv2d(in_ch, self.global_ch, 1)
+        self.conv_g_imag = nn.Conv2d(in_ch, self.global_ch, 1)
         self.bn_g = nn.BatchNorm2d(self.global_ch)
 
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
+        # Local branch
         xl = self.relu(self.bn_l(self.conv_l(x)))
 
+        # Global branch with FFT
+        # Apply FFT
         xg_fft = torch.fft.rfft2(x, norm="ortho")
-        xg_real = xg_fft.real
-        xg_real = torch.nan_to_num(xg_real, nan=0.0, posinf=1e6, neginf=-1e6)
-
-        xg = self.conv_g(xg_real)
-        xg = torch.fft.irfft2(xg, s=x.shape[-2:], norm="ortho")
+        
+        # Process real and imaginary parts separately
+        xg_real = self.conv_g_real(xg_fft.real)
+        xg_imag = self.conv_g_imag(xg_fft.imag)
+        
+        # Reconstruct complex tensor
+        xg_fft_out = torch.complex(xg_real, xg_imag)
+        
+        # Inverse FFT to get back to spatial domain
+        xg = torch.fft.irfft2(xg_fft_out, s=x.shape[-2:], norm="ortho")
+        
+        # Handle potential numerical instability
+        xg = torch.nan_to_num(xg, nan=0.0, posinf=1e4, neginf=-1e4)
+        xg = torch.clamp(xg, -1e4, 1e4)
+        
         xg = self.relu(self.bn_g(xg))
 
         return torch.cat([xl, xg], dim=1)
