@@ -117,7 +117,7 @@ class Encoder(nn.Module):
 
 
 class FFC_Encoder(nn.Module):
-    def __init__(self, params, ratio_g=0.5):
+    def __init__(self, params):
         super(FFC_Encoder, self).__init__()
         self.params = params
         self.in_chns = self.params['in_chns']
@@ -127,7 +127,7 @@ class FFC_Encoder(nn.Module):
         self.dropout = self.params['dropout']
         assert (len(self.ft_chns) == 5)
 
-        self.in_conv = FFCBlock(self.in_chns, self.ft_chns[0], ratio_g=ratio_g)
+        self.in_conv = ConvFFCBlock(self.in_chns, self.ft_chns[0], self.dropout[0])
 
         self.down1 = DownBlock(
             self.ft_chns[0], self.ft_chns[1], self.dropout[1])
@@ -413,7 +413,7 @@ class UNet_URPC_FFC(nn.Module):
                   'bilinear': False,
                   'acti_func': 'relu'}
 
-        self.encoder = FFC_Encoder(params, ratio_g=ratio_g)
+        self.encoder = FFC_Encoder(params)
         self.decoder = Decoder_URPC(params)
 
     def forward(self, x):
@@ -447,48 +447,54 @@ class UNet_DS(nn.Module):
 
 class FFCBlock(nn.Module):
     """
-    Fast Fourier Convolution Block
-    Combines local spatial features with global frequency-domain features
+    Pure Fast Fourier Convolution Block (Global branch only)
     """
-    def __init__(self, in_ch, out_ch, ratio_g=0.5):
+    def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.global_ch = int(out_ch * ratio_g)
-        self.local_ch = out_ch - self.global_ch
 
-        # Local branch - standard spatial convolution
-        self.conv_l = nn.Conv2d(in_ch, self.local_ch, 3, padding=1)
-        self.bn_l = nn.BatchNorm2d(self.local_ch)
+        self.out_ch = out_ch
 
-        # Global branch - process in spatial domain, use FFT for global receptive field
-        # Conv on real and imaginary parts separately
-        self.conv_g_real = nn.Conv2d(in_ch, self.global_ch, 1)
-        self.conv_g_imag = nn.Conv2d(in_ch, self.global_ch, 1)
-        self.bn_g = nn.BatchNorm2d(self.global_ch)
+        self.conv_real = nn.Conv2d(in_ch, out_ch, kernel_size=1)
+        self.conv_imag = nn.Conv2d(in_ch, out_ch, kernel_size=1)
 
-        self.relu = nn.ReLU(inplace=True)
+        self.norm = nn.InstanceNorm2d(out_ch, affine=True)
+        self.relu = nn.LeakyReLU(inplace=True)
 
     def forward(self, x):
-        # Local branch
-        xl = self.relu(self.bn_l(self.conv_l(x)))
+        x_fft = torch.fft.rfft2(x, norm="ortho")
 
-        # Global branch with FFT
-        # Apply FFT
-        xg_fft = torch.fft.rfft2(x, norm="ortho")
-        
-        # Process real and imaginary parts separately
-        xg_real = self.conv_g_real(xg_fft.real)
-        xg_imag = self.conv_g_imag(xg_fft.imag)
-        
-        # Reconstruct complex tensor
-        xg_fft_out = torch.complex(xg_real, xg_imag)
-        
-        # Inverse FFT to get back to spatial domain
-        xg = torch.fft.irfft2(xg_fft_out, s=x.shape[-2:], norm="ortho")
-        
-        # Handle potential numerical instability
-        xg = torch.nan_to_num(xg, nan=0.0, posinf=1e4, neginf=-1e4)
-        xg = torch.clamp(xg, -1e4, 1e4)
-        
-        xg = self.relu(self.bn_g(xg))
+        real = self.conv_real(x_fft.real)
+        imag = self.conv_imag(x_fft.imag)
 
-        return torch.cat([xl, xg], dim=1)
+        x_fft = torch.complex(real, imag)
+        x = torch.fft.irfft2(x_fft, s=x.shape[-2:], norm="ortho")
+        x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
+        x = self.relu(self.norm(x))
+        return x
+
+
+class ConvFFCBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, dropout_p, ratio_g=0.25):
+        super().__init__()
+
+        global_ch = int(out_ch * ratio_g)
+        local_ch = out_ch - global_ch
+
+        self.local = ConvBlock(in_ch, local_ch, dropout_p)
+
+        self.global_ffc = FFCBlock(in_ch, global_ch)
+
+        # Fuse
+        self.fuse = nn.Sequential(
+            nn.Conv2d(out_ch, out_ch, kernel_size=1),
+            nn.InstanceNorm2d(out_ch, affine=True),
+            nn.LeakyReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        xl = self.local(x)
+        xg = self.global_ffc(x)
+
+        x = torch.cat([xl, xg], dim=1)
+        return self.fuse(x)
+
