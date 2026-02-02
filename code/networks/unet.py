@@ -97,22 +97,10 @@ class Encoder(nn.Module):
         self.dropout = self.params['dropout']
         assert (len(self.ft_chns) == 5)
 
-        self.in_conv = nn.Sequential(
-            ConvBlock(self.in_chns, self.ft_chns[0], self.dropout[0]),
-            SEBlock(self.ft_chns[0])
-        )
-        self.down1 = nn.Sequential( 
-            DownBlock(self.ft_chns[0], self.ft_chns[1], self.dropout[1]), 
-            SEBlock(self.ft_chns[1]) 
-        )
-        self.down2 = nn.Sequential( 
-            DownBlock(self.ft_chns[1], self.ft_chns[2], self.dropout[2]), 
-            SEBlock(self.ft_chns[2]) 
-        )
-        self.down3 = nn.Sequential( 
-            DownBlock(self.ft_chns[2], self.ft_chns[3], self.dropout[3]), 
-            SEBlock(self.ft_chns[3]) 
-        )
+        self.in_conv = ConvBlock(self.in_chns, self.ft_chns[0], self.dropout[0])
+        self.down1 = DownBlock(self.ft_chns[0], self.ft_chns[1], self.dropout[1])
+        self.down2 = DownBlock(self.ft_chns[1], self.ft_chns[2], self.dropout[2])
+        self.down3 = DownBlock(self.ft_chns[2], self.ft_chns[3], self.dropout[3])
         self.down4 = nn.Sequential( 
             DownBlock(self.ft_chns[3], self.ft_chns[4], self.dropout[4]), 
             SEBlock(self.ft_chns[4]) 
