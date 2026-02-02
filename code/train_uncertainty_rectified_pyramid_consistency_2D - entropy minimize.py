@@ -201,7 +201,13 @@ def train(args, snapshot_path):
 
             consistency_loss = (consistency_loss_main + consistency_loss_aux1 +
                                 consistency_loss_aux2 + consistency_loss_aux3) / 4
-            loss = supervised_loss + consistency_weight * consistency_loss
+            
+            unlabeled_preds = preds[args.labeled_bs:] # only unlabeled
+            entropy_loss_unlabeled = losses.entropy_minmization(unlabeled_preds)
+
+            alpha = 0.05
+            loss = supervised_loss + consistency_weight * consistency_loss + alpha * entropy_loss_unlabeled
+            
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
