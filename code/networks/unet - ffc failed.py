@@ -96,27 +96,16 @@ class Encoder(nn.Module):
         self.bilinear = self.params['bilinear']
         self.dropout = self.params['dropout']
         assert (len(self.ft_chns) == 5)
-
-        self.in_conv = nn.Sequential(
-            ConvBlock(self.in_chns, self.ft_chns[0], self.dropout[0]),
-            SEBlock(self.ft_chns[0])
-        )
-        self.down1 = nn.Sequential( 
-            DownBlock(self.ft_chns[0], self.ft_chns[1], self.dropout[1]), 
-            SEBlock(self.ft_chns[1]) 
-        )
-        self.down2 = nn.Sequential( 
-            DownBlock(self.ft_chns[1], self.ft_chns[2], self.dropout[2]), 
-            SEBlock(self.ft_chns[2]) 
-        )
-        self.down3 = nn.Sequential( 
-            DownBlock(self.ft_chns[2], self.ft_chns[3], self.dropout[3]), 
-            SEBlock(self.ft_chns[3]) 
-        )
-        self.down4 = nn.Sequential( 
-            DownBlock(self.ft_chns[3], self.ft_chns[4], self.dropout[4]), 
-            SEBlock(self.ft_chns[4]) 
-        )
+        self.in_conv = ConvBlock(
+            self.in_chns, self.ft_chns[0], self.dropout[0])
+        self.down1 = DownBlock(
+            self.ft_chns[0], self.ft_chns[1], self.dropout[1])
+        self.down2 = DownBlock(
+            self.ft_chns[1], self.ft_chns[2], self.dropout[2])
+        self.down3 = DownBlock(
+            self.ft_chns[2], self.ft_chns[3], self.dropout[3])
+        self.down4 = DownBlock(
+            self.ft_chns[3], self.ft_chns[4], self.dropout[4])
 
     def forward(self, x):
         x0 = self.in_conv(x)
@@ -125,6 +114,38 @@ class Encoder(nn.Module):
         x3 = self.down3(x2)
         x4 = self.down4(x3)
         return [x0, x1, x2, x3, x4]
+
+
+class FFC_Encoder(nn.Module):
+    def __init__(self, params):
+        super(FFC_Encoder, self).__init__()
+        self.params = params
+        self.in_chns = self.params['in_chns']
+        self.ft_chns = self.params['feature_chns']
+        self.n_class = self.params['class_num']
+        self.bilinear = self.params['bilinear']
+        self.dropout = self.params['dropout']
+        assert (len(self.ft_chns) == 5)
+
+        self.in_conv = ConvFFCBlock(self.in_chns, self.ft_chns[0], self.dropout[0])
+
+        self.down1 = DownBlock(
+            self.ft_chns[0], self.ft_chns[1], self.dropout[1])
+        self.down2 = DownBlock(
+            self.ft_chns[1], self.ft_chns[2], self.dropout[2])
+        self.down3 = DownBlock(
+            self.ft_chns[2], self.ft_chns[3], self.dropout[3])
+        self.down4 = DownBlock(
+            self.ft_chns[3], self.ft_chns[4], self.dropout[4])
+
+    def forward(self, x):
+        x0 = self.in_conv(x)
+        x1 = self.down1(x0)
+        x2 = self.down2(x1)
+        x3 = self.down3(x2)
+        x4 = self.down4(x3)
+        return [x0, x1, x2, x3, x4]
+
 
 
 class Decoder(nn.Module):
@@ -360,7 +381,7 @@ class UNet_CCT(nn.Module):
         return main_seg, aux_seg1, aux_seg2, aux_seg3
 
 
-class UNet_URPC(nn.Module):
+class UNet_URPC(nn.Module): # tạm thời sửa trực tiếp vào unet_urpc cho đỡ phải sửa nhiều test
     def __init__(self, in_chns, class_num):
         super(UNet_URPC, self).__init__()
 
@@ -370,7 +391,29 @@ class UNet_URPC(nn.Module):
                   'class_num': class_num,
                   'bilinear': False,
                   'acti_func': 'relu'}
-        self.encoder = Encoder(params)
+        self.encoder = FFC_Encoder(params)
+        self.decoder = Decoder_URPC(params)
+
+    def forward(self, x):
+        shape = x.shape[2:]
+        feature = self.encoder(x)
+        dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg = self.decoder(
+            feature, shape)
+        return dp1_out_seg, dp2_out_seg, dp3_out_seg, dp4_out_seg
+    
+
+class UNet_URPC_FFC(nn.Module):
+    def __init__(self, in_chns, class_num, ratio_g=0.5):
+        super(UNet_URPC_FFC, self).__init__()
+
+        params = {'in_chns': in_chns,
+                  'feature_chns': [16, 32, 64, 128, 256],
+                  'dropout': [0.05, 0.1, 0.2, 0.3, 0.5],
+                  'class_num': class_num,
+                  'bilinear': False,
+                  'acti_func': 'relu'}
+
+        self.encoder = FFC_Encoder(params)
         self.decoder = Decoder_URPC(params)
 
     def forward(self, x):
@@ -401,19 +444,60 @@ class UNet_DS(nn.Module):
             feature, shape)
         return dp0_out_seg, dp1_out_seg, dp2_out_seg, dp3_out_seg
 
-class SEBlock(nn.Module):
-    def __init__(self, channels, reduction=16):
-        super(SEBlock, self).__init__()
-        reduced_dim = max(4, channels // reduction)
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduced_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduced_dim, channels),
-            nn.Sigmoid()
+
+class FFCBlock(nn.Module):
+    """
+    Pure Fast Fourier Convolution Block (Global branch only)
+    """
+    def __init__(self, in_ch, out_ch, dropout_p=0.0):
+        super().__init__()
+
+        self.out_ch = out_ch
+
+        self.conv_real = nn.Conv2d(in_ch, out_ch, kernel_size=1)
+        self.conv_imag = nn.Conv2d(in_ch, out_ch, kernel_size=1)
+
+        self.norm = nn.InstanceNorm2d(out_ch, affine=True)
+        self.relu = nn.LeakyReLU(inplace=True)
+
+        self.dropout = nn.Dropout(dropout_p)
+
+    def forward(self, x):
+        x_fft = torch.fft.rfft2(x, norm="ortho")
+
+        real = self.conv_real(x_fft.real)
+        imag = self.conv_imag(x_fft.imag)
+
+        x_fft = torch.complex(real, imag)
+        x = torch.fft.irfft2(x_fft, s=x.shape[-2:], norm="ortho")
+        x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
+        x = self.relu(self.norm(x))
+        x = self.dropout(x)
+        return x
+
+
+class ConvFFCBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, dropout_p, ratio_g=0.2):
+        super().__init__()
+
+        global_ch = int(out_ch * ratio_g)
+        local_ch = out_ch - global_ch
+
+        self.local = ConvBlock(in_ch, local_ch, dropout_p)
+
+        self.global_ffc = FFCBlock(in_ch, global_ch, dropout_p)
+
+        # Fuse
+        self.fuse = nn.Sequential(
+            nn.Conv2d(out_ch, out_ch, kernel_size=1),
+            nn.InstanceNorm2d(out_ch, affine=True),
+            nn.LeakyReLU(inplace=True)
         )
 
     def forward(self, x):
-        b, c, h, w = x.size()
-        y = x.mean(dim=(2, 3))  # Global Average Pooling
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y
+        xl = self.local(x)
+        xg = self.global_ffc(x)
+
+        x = torch.cat([xl, xg], dim=1)
+        return self.fuse(x)
+
