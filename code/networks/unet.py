@@ -102,12 +102,12 @@ class Encoder(nn.Module):
         self.down2 = DownBlock(self.ft_chns[1], self.ft_chns[2], self.dropout[2])
         self.down3 = DownBlock(self.ft_chns[2], self.ft_chns[3], self.dropout[3])
 
-        self.down4 = DownBlock(self.ft_chns[3], self.ft_chns[4], self.dropout[4])
+        # self.down4 = DownBlock(self.ft_chns[3], self.ft_chns[4], self.dropout[4])
 
-        # self.down4 = nn.Sequential( 
-        #     DownBlock(self.ft_chns[3], self.ft_chns[4], self.dropout[4]), 
-        #     SEBlock(self.ft_chns[4]) 
-        # )
+        self.down4 = nn.Sequential( 
+            DownBlock(self.ft_chns[3], self.ft_chns[4], self.dropout[4]), 
+            SEBlock(self.ft_chns[4]) 
+        )
 
     def forward(self, x):
         x0 = self.in_conv(x)
