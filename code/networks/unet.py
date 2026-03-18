@@ -47,6 +47,82 @@ class ConvBlock(nn.Module):
         return self.conv_conv(x)
 
 
+class InceptionConvBlock(nn.Module):
+    """
+    Inception-like block to capture multi-scale features and reduce uncertainty artifacts.
+    Replaces Standard ConvBlock.
+    Structure:
+    - Branch 1: 1x1 Conv
+    - Branch 2: 1x1 Conv -> 3x3 Conv
+    - Branch 3: 1x1 Conv -> 5x5 Conv
+    - Branch 4: MaxPool -> 1x1 Conv
+    Concatenate -> Dropout -> 3x3 Conv (to mix and refine)
+    """
+    def __init__(self, in_channels, out_channels, dropout_p):
+        super(InceptionConvBlock, self).__init__()
+        
+        # Ensure out_channels is divisible by 4 for the split
+        assert out_channels % 4 == 0, "out_channels must be divisible by 4 for InceptionBlock"
+        mid_channels = out_channels // 4
+        
+        # Branch 1: 1x1 conv
+        self.branch1 = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.LeakyReLU()
+        )
+
+        # Branch 2: 1x1 -> 3x3
+        self.branch2 = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.LeakyReLU(),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.LeakyReLU()
+        )
+
+        # Branch 3: 1x1 -> 5x5 (padding=2 for same spatial size)
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.LeakyReLU(),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=5, padding=2),
+            nn.BatchNorm2d(mid_channels),
+            nn.LeakyReLU()
+        )
+
+        # Branch 4: MaxPool -> 1x1
+        self.branch4 = nn.Sequential(
+            nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(in_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.LeakyReLU()
+        )
+        
+        self.dropout = nn.Dropout(dropout_p)
+        
+        # Final convolution to mix features and ensure full capacity
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU()
+        )
+
+    def forward(self, x):
+        x1 = self.branch1(x)
+        x2 = self.branch2(x)
+        x3 = self.branch3(x)
+        x4 = self.branch4(x)
+        
+        # Concatenate along channel dimension
+        out = torch.cat([x1, x2, x3, x4], dim=1)
+        
+        out = self.dropout(out)
+        out = self.final_conv(out)
+        return out
+
+
 class DownBlock(nn.Module):
     """Downsampling followed by ConvBlock"""
 
@@ -54,7 +130,8 @@ class DownBlock(nn.Module):
         super(DownBlock, self).__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool2d(2),
-            ConvBlock(in_channels, out_channels, dropout_p)
+            InceptionConvBlock(in_channels, out_channels, dropout_p)
+            # ConvBlock(in_channels, out_channels, dropout_p)
 
         )
 
@@ -76,7 +153,8 @@ class UpBlock(nn.Module):
         else:
             self.up = nn.ConvTranspose2d(
                 in_channels1, in_channels2, kernel_size=2, stride=2)
-        self.conv = ConvBlock(in_channels2 * 2, out_channels, dropout_p)
+        self.conv = InceptionConvBlock(in_channels2 * 2, out_channels, dropout_p)
+        # self.conv = ConvBlock(in_channels2 * 2, out_channels, dropout_p)
 
     def forward(self, x1, x2):
         if self.bilinear:
@@ -97,7 +175,8 @@ class Encoder(nn.Module):
         self.dropout = self.params['dropout']
         assert (len(self.ft_chns) == 5)
 
-        self.in_conv = ConvBlock(self.in_chns, self.ft_chns[0], self.dropout[0])
+        self.in_conv = InceptionConvBlock(self.in_chns, self.ft_chns[0], self.dropout[0])
+        # self.in_conv = ConvBlock(self.in_chns, self.ft_chns[0], self.dropout[0])
         self.down1 = DownBlock(self.ft_chns[0], self.ft_chns[1], self.dropout[1])
         self.down2 = DownBlock(self.ft_chns[1], self.ft_chns[2], self.dropout[2])
         self.down3 = DownBlock(self.ft_chns[2], self.ft_chns[3], self.dropout[3])
